@@ -68,7 +68,6 @@ func httpLoggingAndMetricsHandler(log logrus.FieldLogger, reqs *prometheus.Count
 			"method": r.Method,
 			"path":   r.URL.String(),
 		})
-
 		defer func(t time.Time) {
 			reqs.WithLabelValues(strconv.Itoa(status)).Add(1)
 			log.WithField("status", status).WithField("duration", time.Since(t).Seconds()).Info()

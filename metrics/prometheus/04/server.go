@@ -1,12 +1,10 @@
 package main
 
 import (
-	"expvar"
-	"fmt"
 	"math/rand"
 	"net/http"
 	"os"
-	"sync"
+	"strconv"
 	"time"
 
 	"github.com/pkg/errors"
@@ -14,29 +12,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 )
-
-type myTimer struct {
-	mu    sync.RWMutex
-	count int
-	sum   time.Duration
-}
-
-func (v *myTimer) Finish(t time.Time) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.sum += time.Since(t)
-	v.count++
-}
-
-func (v *myTimer) String() string {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	var avg int
-	if v.count != 0 { // avoid divide by zero
-		avg = int(v.sum) / v.count
-	}
-	return fmt.Sprintf(`{"Count": %d, "Sum": %d, "Avg": %d}`, v.count, v.sum, avg)
-}
 
 func work(log logrus.FieldLogger) error { // pretend work
 	defer func(t time.Time) {
@@ -53,30 +28,21 @@ func work(log logrus.FieldLogger) error { // pretend work
 	return err
 }
 
-func timerMiddleware(t *myTimer, hf http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		defer t.Finish(time.Now())
-		hf(w, r)
-	}
-}
-
-func httpLoggingAndMetricsHandler(log logrus.FieldLogger, reqs, errs prometheus.Counter) http.HandlerFunc {
+func httpLoggingAndMetricsHandler(log logrus.FieldLogger, durs prometheus.ObserverVec) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusOK // net/http returns 200 by default
 		log = log.WithFields(logrus.Fields{
 			"method": r.Method,
 			"path":   r.URL.String(),
 		})
-
-		reqs.Add(1)
-
 		defer func(t time.Time) {
-			log.WithField("status", status).WithField("duration", time.Since(t).Seconds()).Info()
+			secs := time.Since(t).Seconds()
+			durs.WithLabelValues(strconv.Itoa(status)).Observe(secs)
+			log.WithField("status", status).WithField("duration", secs).Info()
 		}(time.Now())
 
 		if err := work(log); err != nil {
 			status = http.StatusBadRequest
-			errs.Add(1)
 			http.Error(w, "Nope", status)
 			log.Error("OMG Error!")
 			return
@@ -98,32 +64,33 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	// Expose the port value
-	ep := expvar.NewString("Port")
-	ep.Set(port)
 
-	// Expose metrics to prometheus
 	http.Handle("/metrics", promhttp.Handler())
 
-	reqs := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "http_requests_total",
-		Help: "Total http requests",
-	})
-	prometheus.MustRegister(reqs)
+	// Expose the port value
+	info := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "program_info",
+		Help: "Info about the program.",
+	},
+		[]string{"port"},
+	)
+	prometheus.MustRegister(info)
+	info.WithLabelValues(port).Set(1)
 
-	errs := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "http_errors_total",
-		Help: "Total http errors",
-	})
-	prometheus.MustRegister(errs)
+	durs := prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "http_request_duration_seconds",
+			Help: "HTTP request duration.",
+			// Chosen because the range is 00-99 ms
+			Buckets: []float64{.01, .02, .03, .04, .05, .06, .07, .08, .09},
+		},
+		[]string{"code"},
+	)
+	prometheus.MustRegister(durs)
+	durs.WithLabelValues(strconv.Itoa(http.StatusOK))
+	durs.WithLabelValues(strconv.Itoa(http.StatusBadRequest))
 
-	var t myTimer
-	expvar.Publish("Requests", &t)
-
-	http.HandleFunc("/", timerMiddleware(
-		&t,
-		httpLoggingAndMetricsHandler(log, reqs, errs),
-	))
+	http.HandleFunc("/", httpLoggingAndMetricsHandler(log, durs))
 
 	log.Info("Listening at: http://localhost:" + port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
