@@ -12,7 +12,7 @@ import (
 
 func work(log logrus.FieldLogger) error { // pretend work
 	defer func(t time.Time) {
-		log.WithField("work_seconds", time.Since(t).Seconds()).Info("Work complete")
+		log.WithField("duration", time.Since(t).Seconds()).Info("[work] complete")
 	}(time.Now())
 
 	s := rand.Intn(99) + 1 // 1..100
@@ -21,6 +21,9 @@ func work(log logrus.FieldLogger) error { // pretend work
 	var err error
 	if s <= 25 { // ~25% of the time the work errors
 		err = errors.New("OMG Error!")
+		log.WithFields(logrus.Fields{
+			"s": s,
+		}).Error("[work] incomplete")
 	}
 	return err
 }
@@ -32,14 +35,20 @@ func httpLogginghandler(log logrus.FieldLogger) http.HandlerFunc {
 			"method": r.Method,
 			"path":   r.URL.String(),
 		})
+
 		defer func(t time.Time) {
-			log.WithField("status", status).WithField("duration", time.Since(t).Seconds()).Info()
+			log.WithFields(logrus.Fields{
+				"status":   status,
+				"duration": time.Since(t).Seconds(),
+			}).Info()
 		}(time.Now())
 
 		if err := work(log); err != nil {
 			status = http.StatusBadRequest
 			http.Error(w, "Nope", status)
-			log.Error("OMG Error!")
+			log.WithFields(logrus.Fields{
+				"status": status,
+			}).Error(err.Error())
 			return
 		}
 
@@ -48,16 +57,9 @@ func httpLogginghandler(log logrus.FieldLogger) http.HandlerFunc {
 }
 
 func main() {
-	/*logrus.SetFormatter(&logrus.TextFormatter{
-		DisableColors: true,
-	})*/
-
-	logrus.SetFormatter(&logrus.JSONFormatter{
-		DisableColors: true,
-	})
 
 	// curried log
-	log := logrus.WithField("app", "logs-02-server")
+	log := logrus.WithField("app", "logs_lab_2")
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -66,7 +68,8 @@ func main() {
 
 	http.HandleFunc("/", httpLogginghandler(log))
 
-	log.Info("Listening at: http://localhost:" + port)
+	log.WithField("port", port).Info("Listening at: http://localhost")
+
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal("Errored with: " + err.Error())
 	}
